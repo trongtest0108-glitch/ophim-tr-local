@@ -120,20 +120,51 @@ jQuery(function($){
 });
 
 jQuery(function ($) {
-    var filterType = JSON.parse(localStorage.getItem("filterType")) != null ? JSON.parse(localStorage.getItem("filterType")) : [];
-    var filterCategory = JSON.parse(localStorage.getItem("filterCategory")) != null ? JSON.parse(localStorage.getItem("filterCategory")) : [];
-    var filterCountry = JSON.parse(localStorage.getItem("filterCountry")) != null ? JSON.parse(localStorage.getItem("filterCountry")) : [];
-    var filterYear = JSON.parse(localStorage.getItem("filterYear")) != null ? JSON.parse(localStorage.getItem("filterYear")) : [];
+    const toIntOrDefault = (value, defaultValue) => {
+        const n = parseInt(value, 10);
+        return Number.isFinite(n) ? n : defaultValue;
+    };
+    const parseArrayStorage = (key) => {
+        try {
+            const raw = localStorage.getItem(key);
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (e) {
+            localStorage.removeItem(key);
+            return [];
+        }
+    };
+    const dedupeLinks = (links) => {
+        const seen = new Set();
+        const out = [];
+        links.forEach((item) => {
+            const v = item.trim();
+            if (!v || seen.has(v)) return;
+            seen.add(v);
+            out.push(v);
+        });
+        return out;
+    };
+    var filterType = parseArrayStorage("filterType");
+    var filterCategory = parseArrayStorage("filterCategory");
+    var filterCountry = parseArrayStorage("filterCountry");
+    var filterYear = parseArrayStorage("filterYear");
 
-    var page_from = localStorage.getItem("page_from") ? localStorage.getItem("page_from") : 10;
-    var page_to = localStorage.getItem("page_to") ? localStorage.getItem("page_to") : 1;
+    var page_from = toIntOrDefault(localStorage.getItem("page_from"), 10);
+    var page_to = toIntOrDefault(localStorage.getItem("page_to"), 1);
     $("input[name=page_from]").val(page_from);
     $("input[name=page_to]").val(page_to);
 
-    var timeout_from = localStorage.getItem("timeout_from") ? localStorage.getItem("timeout_from") : 1000;
-    var timeout_to = localStorage.getItem("timeout_to") ? localStorage.getItem("timeout_to") : 3000;
+    var timeout_from = toIntOrDefault(localStorage.getItem("timeout_from"), 1000);
+    var timeout_to = toIntOrDefault(localStorage.getItem("timeout_to"), 3000);
     $("input[name=timeout_from]").val(timeout_from);
     $("input[name=timeout_to]").val(timeout_to);
+    var crawlConcurrency = toIntOrDefault(localStorage.getItem("crawl_concurrency"), 1);
+    if (crawlConcurrency < 1) crawlConcurrency = 1;
+    if (crawlConcurrency > 10) crawlConcurrency = 10;
+    $("input[name=crawl_concurrency]").val(crawlConcurrency);
+    $("input[name='crawl_fast_mode']").prop("checked", localStorage.getItem("crawl_fast_mode") === "1");
 
     $("input[name='filter_type[]']").each(function () {
         if (filterType.includes($(this).val())) {
@@ -171,6 +202,12 @@ jQuery(function ($) {
     const divCrawlStats = $("div#crawl_stats");
     const divCrawlStatsText = $("p#crawl_stats_text");
     const textArealistMovies = $("textarea#result_list_movies");
+    const divQueueInfo = $("div#crawl_queue_info");
+    const divQueueText = $("p#crawl_queue_text");
+    const divDashboard = $("div#crawl_dashboard");
+    const dashSuccess = $("span#dash_success");
+    const dashFailed = $("span#dash_failed");
+    const dashFiltered = $("span#dash_filtered");
     const buttonCrawlMovies = $("div#crawl_movies");
     const buttonRollMovies = $("div#roll_movies");
     const divMsgCrawlSuccess = $("div#result_success");
@@ -184,11 +221,50 @@ jQuery(function ($) {
         error: 0,
         filtered: 0
     };
+    let crawlTiming = {
+        startedAt: 0,
+        totalMs: 0,
+        minMs: null,
+        maxMs: 0,
+        measured: 0
+    };
+    let crawlQueue = [];
+    let activeWorkers = 0;
+    const formatDuration = (ms) => {
+        if (!Number.isFinite(ms) || ms < 0) ms = 0;
+        if (ms < 1000) return `${Math.round(ms)}ms`;
+        const sec = ms / 1000;
+        if (sec < 60) return `${sec.toFixed(2)}s`;
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return `${m}m ${s}s`;
+    };
+    const recordCrawlDuration = (ms) => {
+        if (!Number.isFinite(ms) || ms < 0) return;
+        crawlTiming.totalMs += ms;
+        crawlTiming.measured++;
+        if (crawlTiming.minMs === null || ms < crawlTiming.minMs) crawlTiming.minMs = ms;
+        if (ms > crawlTiming.maxMs) crawlTiming.maxMs = ms;
+    };
     const updateCrawlStatsText = () => {
         const remain = Math.max(crawlStats.total - crawlStats.done, 0);
-        const statsText = `Tổng: ${crawlStats.total} | Đã xử lý: ${crawlStats.done} | Thành công: ${crawlStats.success} | Lỗi: ${crawlStats.error} | Bỏ qua: ${crawlStats.filtered} | Còn lại: ${remain}`;
+        const avgMs = crawlTiming.measured > 0 ? (crawlTiming.totalMs / crawlTiming.measured) : 0;
+        const elapsedMs = crawlTiming.startedAt > 0 ? (Date.now() - crawlTiming.startedAt) : 0;
+        const minText = crawlTiming.minMs === null ? "-" : formatDuration(crawlTiming.minMs);
+        const statsText = `Tổng link: ${crawlStats.total} | Đã crawl: ${crawlStats.done} | Thành công: ${crawlStats.success} | Lỗi: ${crawlStats.error} | Bỏ qua: ${crawlStats.filtered} | Còn lại: ${remain} | Min: ${minText} | TB: ${formatDuration(avgMs)} | Max: ${formatDuration(crawlTiming.maxMs)} | Tổng TG xử lý: ${formatDuration(crawlTiming.totalMs)} | TG đã chạy: ${formatDuration(elapsedMs)}`;
         divMsgText.html(statsText);
         divCrawlStatsText.html(statsText);
+    };
+    const updateQueueInfo = () => {
+        const list = textArealistMovies.val().split("\n").map((item) => item.trim()).filter((item) => item !== "");
+        divQueueInfo.show(200);
+        divQueueText.html(`Còn lại: ${list.length} link`);
+    };
+    const updateDashboard = () => {
+        dashSuccess.text(crawlStats.success);
+        dashFailed.text(crawlStats.error);
+        dashFiltered.text(crawlStats.filtered);
+        divDashboard.show(200);
     };
 
     buttonRollMovies.on("click", () => {
@@ -197,25 +273,45 @@ jQuery(function ($) {
         listLink.sort(() => Math.random() - 0.5);
         listLink = listLink.join("\n");
         textArealistMovies.val(listLink);
+        updateQueueInfo();
     });
 
     buttonGetListMovies.on("click", () => {
         divMsg.show(300);
         textArealistMovies.show(300);
-        crawl_page_callback(parseInt(inputPageFrom.val()));
+        let fromPage = toIntOrDefault(inputPageFrom.val(), page_from);
+        let toPage = toIntOrDefault(inputPageTo.val(), page_to);
+        if (fromPage < toPage) {
+            const tmp = fromPage;
+            fromPage = toPage;
+            toPage = tmp;
+        }
+        inputPageFrom.val(fromPage);
+        inputPageTo.val(toPage);
+        localStorage.setItem("page_from", fromPage.toString());
+        localStorage.setItem("page_to", toPage.toString());
+        crawl_page_callback(fromPage);
     });
     const crawl_page_callback = (currentPage) => {
         var url_api = $("#url_api").val();
+        const toPage = toIntOrDefault(inputPageTo.val(), 1);
+        if (!Number.isFinite(currentPage)) {
+            divMsgText.html("Lỗi page crawl: From/To không hợp lệ.");
+            buttonGetListMovies.show(300);
+            return false;
+        }
 
         var urlPageCrawl = url_api+`?page=${currentPage}`;
 
-        if (currentPage < parseInt(inputPageTo.val())) {
+        if (currentPage < toPage) {
 
             var text = $("#result_list_movies").val();
             var lines = text.split(/\r|\r\n|\n/);
             var count = lines.length;
             divMsgText.html("Done! " + count +" Phim");
             buttonCrawlMovies.show(300);
+            buttonGetListMovies.show(300);
+            updateQueueInfo();
             return false;
         }
         divMsgText.html(`Crawl Page: ${urlPageCrawl}`);
@@ -235,8 +331,13 @@ jQuery(function ($) {
                 else currentList += res;
 
                 textArealistMovies.val(currentList);
+                updateQueueInfo();
                 currentPage--;
                 crawl_page_callback(currentPage);
+            },
+            error: function () {
+                divMsgText.html("Get List lỗi: không lấy được dữ liệu từ API.");
+                buttonGetListMovies.show(300);
             },
         });
     };
@@ -245,6 +346,22 @@ jQuery(function ($) {
     var inputFilterCategory = [];
     var inputFilterCountry = [];
     var inputFilterYear = [];
+    const parseErrorMessage = (xhr, thrownError) => {
+        let reason = "";
+        if (xhr && xhr.responseText) {
+            try {
+                const json = JSON.parse(xhr.responseText);
+                if (json && json.msg) reason = json.msg;
+            } catch (e) {
+                reason = xhr.responseText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+            }
+        }
+        if (!reason) {
+            reason = thrownError || (xhr ? `${xhr.status} ${xhr.statusText}` : "Unknown error");
+        }
+        if (reason.length > 250) reason = reason.substring(0, 250) + "...";
+        return reason;
+    };
 
     buttonCrawlMovies.on("click", () => {
         divMsg.show(300);
@@ -256,6 +373,10 @@ jQuery(function ($) {
         inputFilterCountry = [];
         inputFilterYear = [];
         let listLink = textArealistMovies.val().split("\n").map((item) => item.trim()).filter((item) => item !== "");
+        listLink = dedupeLinks(listLink);
+        crawlQueue = listLink.slice();
+        textArealistMovies.val(crawlQueue.join("\n"));
+        updateQueueInfo();
         crawlStats = {
             total: listLink.length,
             done: 0,
@@ -263,7 +384,15 @@ jQuery(function ($) {
             error: 0,
             filtered: 0
         };
+        crawlTiming = {
+            startedAt: Date.now(),
+            totalMs: 0,
+            minMs: null,
+            maxMs: 0,
+            measured: 0
+        };
         updateCrawlStatsText();
+        updateDashboard();
 
         $("input[name='filter_type[]']:checked").each(function () {
             inputFilterType.push($(this).val());
@@ -275,22 +404,43 @@ jQuery(function ($) {
             inputFilterCountry.push($(this).val());
         });
         inputFilterYear = getFilterYear();
+        let workerCount = toIntOrDefault($("input[name='crawl_concurrency']").val(), 1);
+        if (workerCount < 1) workerCount = 1;
+        if (workerCount > 10) workerCount = 10;
+        $("input[name='crawl_concurrency']").val(workerCount);
+        localStorage.setItem("crawl_concurrency", workerCount.toString());
+        localStorage.setItem("crawl_fast_mode", $("input[name='crawl_fast_mode']").is(":checked") ? "1" : "0");
 
-        crawl_movies(false);
+        buttonCrawlMovies.hide(300);
+        buttonRollMovies.hide(300);
+        if (crawlQueue.length === 0) {
+            updateCrawlStatsText();
+            return;
+        }
+        activeWorkers = Math.min(workerCount, crawlQueue.length);
+        for (let i = 0; i < activeWorkers; i++) {
+            crawl_movies();
+        }
     });
     const crawl_movies = () => {
-        var listLink = textArealistMovies.val();
-        listLink = listLink.split("\n").filter((item) => item.trim() !== "");
-        let linkCurrent = listLink.shift();
+        let linkCurrent = crawlQueue.shift();
         if (!linkCurrent) {
-            const doneText = `Crawl Done! Tổng: ${crawlStats.total} | Thành công: ${crawlStats.success} | Lỗi: ${crawlStats.error} | Bỏ qua: ${crawlStats.filtered}`;
-            divMsgText.html(doneText);
-            divCrawlStatsText.html(doneText);
+            activeWorkers--;
+            if (activeWorkers <= 0) {
+                buttonCrawlMovies.show(300);
+                buttonRollMovies.show(300);
+                const doneText = `Crawl Done! Tổng: ${crawlStats.total} | Thành công: ${crawlStats.success} | Lỗi: ${crawlStats.error} | Bỏ qua: ${crawlStats.filtered}`;
+                divMsgText.html(doneText);
+                divCrawlStatsText.html(doneText);
+            }
+            textArealistMovies.val(crawlQueue.join("\n"));
+            updateQueueInfo();
             return false;
         }
-        listLink = listLink.join("\n");
-        textArealistMovies.val(listLink);
+        textArealistMovies.val(crawlQueue.join("\n"));
+        updateQueueInfo();
         updateCrawlStatsText();
+        const requestStartedAt = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
 
         $.ajax({
             url: ajaxurl,
@@ -304,12 +454,26 @@ jQuery(function ($) {
                 filterYear: inputFilterYear,
             },
             beforeSend: function () {
-                buttonCrawlMovies.hide(300);
-                buttonRollMovies.hide(300);
             },
             success: function (res) {
                 console.log(res)
-                let data = JSON.parse(res);
+                let data;
+                try {
+                    data = JSON.parse(res);
+                } catch (e) {
+                    const requestEndedAt = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+                    recordCrawlDuration(requestEndedAt - requestStartedAt);
+                    crawlStats.done++;
+                    crawlStats.error++;
+                    let currentList = textAreaResultError.val();
+                    const errorLine = `${linkCurrent}=====>>Invalid JSON response`;
+                    if (currentList != "") currentList += "\n" + errorLine;
+                    else currentList += errorLine;
+                    textAreaResultError.val(currentList);
+                    updateCrawlStatsText();
+                    crawl_movies();
+                    return;
+                }
                 if (parseInt(data.schedule_code, 10) === 4) {
                     crawlStats.filtered++;
                     let currentList = textAreaResultError.val();
@@ -329,6 +493,8 @@ jQuery(function ($) {
                     else currentList += linkCurrent;
                     textAreaResultError.val(currentList + "=====>>" + data.msg);
                 }
+                const requestEndedAt = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+                recordCrawlDuration(requestEndedAt - requestStartedAt);
                 crawlStats.done++;
 
                 var wait_timeout = 1000;
@@ -339,20 +505,29 @@ jQuery(function ($) {
                     let minimum = Math.min(timeout_from, timeout_to);
                     wait_timeout = Math.floor(Math.random() * (maximum - minimum + 1)) + minimum;
                 }
+                if ($("input[name='crawl_fast_mode']").is(":checked")) {
+                    wait_timeout = 0;
+                }
                 updateCrawlStatsText();
+                updateDashboard();
                 setTimeout(() => {
                     crawl_movies();
                 }, wait_timeout);
             },
             error: function (xhr, ajaxOptions, thrownError) {
+                const requestEndedAt = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+                recordCrawlDuration(requestEndedAt - requestStartedAt);
                 crawlStats.done++;
                 crawlStats.error++;
                 let currentList = textAreaResultError.val();
-                if (currentList != "") currentList += "\n" + linkCurrent;
-                else currentList += linkCurrent;
+                const reason = parseErrorMessage(xhr, thrownError);
+                const errorLine = `${linkCurrent}=====>>${reason}`;
+                if (currentList != "") currentList += "\n" + errorLine;
+                else currentList += errorLine;
                 textAreaResultError.val(currentList);
 
                 updateCrawlStatsText();
+                updateDashboard();
                 crawl_movies();
             },
         });
@@ -396,6 +571,16 @@ jQuery(function ($) {
     });
     $("input[name=timeout_to]").change((e) => {
         localStorage.setItem("timeout_to", $("input[name=timeout_to]").val());
+    });
+    $("input[name=crawl_concurrency]").change(() => {
+        let workerCount = toIntOrDefault($("input[name=crawl_concurrency]").val(), 1);
+        if (workerCount < 1) workerCount = 1;
+        if (workerCount > 10) workerCount = 10;
+        $("input[name=crawl_concurrency]").val(workerCount);
+        localStorage.setItem("crawl_concurrency", workerCount.toString());
+    });
+    $("input[name='crawl_fast_mode']").change(() => {
+        localStorage.setItem("crawl_fast_mode", $("input[name='crawl_fast_mode']").is(":checked") ? "1" : "0");
     });
 
 

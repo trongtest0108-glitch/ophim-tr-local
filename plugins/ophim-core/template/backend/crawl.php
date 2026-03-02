@@ -227,6 +227,13 @@ $tab = isset($_GET['tab']) ? $_GET['tab'] : $default_tab;
                     <div class="crawl_page">
                         Wait Timeout Random: From <input type="number" name="timeout_from" value="">(ms) -
                         To <input type="number" name="timeout_to" value=""> (ms)
+                        <span style="margin-left: 10px;">
+                            Luồng crawl:
+                            <input type="number" name="crawl_concurrency" min="1" max="10" value="1" style="width:70px;">
+                        </span>
+                        <span style="margin-left: 10px;">
+                            <label><input type="checkbox" name="crawl_fast_mode"> Fast mode (giảm chờ)</label>
+                        </span>
                     </div>
 
                     <div class="crawl_page">
@@ -235,6 +242,17 @@ $tab = isset($_GET['tab']) ? $_GET['tab'] : $default_tab;
                         </div>
                         <div style="display: none" id="msg" class="notice notice-success">
                             <p id="msg_text"></p>
+                        </div>
+                        <div id="crawl_queue_info" class="notice notice-info" style="display:none;">
+                            <p id="crawl_queue_text">Còn lại: 0 link</p>
+                        </div>
+                        <div id="crawl_dashboard" class="notice notice-info" style="display:none;">
+                            <p>
+                                <strong>Dashboard:</strong>
+                                Thành công: <span id="dash_success">0</span> |
+                                Thất bại: <span id="dash_failed">0</span> |
+                                Bị loại: <span id="dash_filtered">0</span>
+                            </p>
                         </div>
                         <textarea style="width: 100%" rows="10" id="result_list_movies" class="list_movies"></textarea>
                         <div id="roll_movies" class="roll">Trộn Link</div>

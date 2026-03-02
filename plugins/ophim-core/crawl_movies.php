@@ -10,9 +10,14 @@ add_filter('intermediate_image_sizes_advanced', 'remove_image_sizes', 10, 2);
 
 function crawl_ophim_page_handle($url)
 {
-
-    $sourcePage = file_get_contents($url);
+    $sourcePage = @file_get_contents($url);
+    if ($sourcePage === false) {
+        return '';
+    }
     $sourcePage = json_decode($sourcePage);
+    if (!$sourcePage) {
+        return '';
+    }
     $listMovies = [];
     if (isset($sourcePage->items)) {
         $sourcePage = $sourcePage->items;
@@ -57,6 +62,12 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
     try {
         $args = array(
             'post_type' => 'ophim',
+            'post_status' => 'any',
+            'posts_per_page' => 1,
+            'fields' => 'ids',
+            'no_found_rows' => true,
+            'update_post_meta_cache' => false,
+            'update_post_term_cache' => false,
             'meta_query' => array(
                 array(
                     'key' => 'ophim_fetch_ophim_id',
@@ -65,30 +76,15 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
                 )
             )
         );
-        $wp_query = new WP_Query($args);
+        $post_ids = get_posts($args);
 
-        $total = $wp_query->found_posts;
-
-        if ($total > 0) { # Trường hợp đã có
-
-            $args = array(
-                'post_type' => 'ophim',
-                'meta_query' => array(
-                    array(
-                        'key' => 'ophim_fetch_ophim_id',
-                        'value' => $ophim_id,
-                        'compare' => '=',
-                    )
-                )
-            );
-            $wp_query = new WP_Query($args);
-            if ($wp_query->have_posts()) : while ($wp_query->have_posts()) : $wp_query->the_post();
-                global $post;
-                $get_fetch_time = get_post_meta($post->ID, 'ophim_fetch_ophim_update_time', true);
+        if (!empty($post_ids)) { # Trường hợp đã có
+            $post_id = (int)$post_ids[0];
+            $get_fetch_time = get_post_meta($post_id, 'ophim_fetch_ophim_update_time', true);
                 if ($get_fetch_time == $ophim_update_time) { // Không có gì cần cập nhật
                     $result = array(
                         'status' => true,
-                        'post_id' => $post->ID,
+                        'post_id' => $post_id,
                         'list_episode' => [],
                         'msg' => 'Nothing needs updating!',
                         'wait' => false,
@@ -97,13 +93,12 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
                     return json_encode($result);
                 }
 
-                $sourcePage = file_get_contents($url);
-                $sourcePage = json_decode($sourcePage, true);
+                $sourcePage = fetch_movie_source($url);
                 $data = create_data($sourcePage, $url, $ophim_id, $ophim_update_time, $filterType, $filterCategory, $filterCountry, $filterYear);
                 if (oIsset($data, 'crawl_filter') === true) {
                     $result = array(
                         'status' => true,
-                        'post_id' => $post->ID,
+                        'post_id' => $post_id,
                         'list_episode' => [],
                         'msg' => 'Movie matched filter settings!',
                         'wait' => false,
@@ -116,8 +111,6 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
 
                 // Re-Update Movies Info
                 $formality = ($data['type'] == 'tv_series') ? 'tv_series' : 'single_movies';
-                //
-                $post_id = $post->ID;
 
                 update_post_meta($post_id, 'ophim_movie_formality', $formality);
                 update_post_meta($post_id, 'ophim_movie_status', $status);
@@ -133,9 +126,9 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
 		update_post_meta($post_id, 'ophim_lang', $data['lang']);
                 update_post_meta($post_id, 'ophim_showtime_movies', $data['showtime']);
                 $updatepost = array(
-                    'post_modified'  => date(),
-                    'post_modified_gmt'   => date(),
-                    'ID'          => $post_id, 
+                    'post_modified' => current_time('mysql'),
+                    'post_modified_gmt' => current_time('mysql', 1),
+                    'ID' => $post_id,
                 );
                 wp_update_post( $updatepost );
 
@@ -153,23 +146,19 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
                 }
 
                 // Re-Update Episodes
-                $list_episode = get_list_episode($sourcePage, $post->ID);
+                $list_episode = get_list_episode($sourcePage, $post_id);
                 $result = array(
                     'status' => true,
-                    'post_id' => $post->ID,
+                    'post_id' => $post_id,
                     'data' => $data,
                     'list_episode' => $list_episode,
                     'wait' => true,
                     'schedule_code' => SCHEDULE_CRAWLER_TYPE_UPDATE
                 );
-                //wp_update_post($post);
                 return json_encode($result);
-            endwhile;
-            endif;
         }
 
-        $sourcePage = file_get_contents($url);
-        $sourcePage = json_decode($sourcePage, true);
+        $sourcePage = fetch_movie_source($url);
         $data = create_data($sourcePage, $url, $ophim_id, $ophim_update_time, $filterType, $filterCategory, $filterCountry, $filterYear);
         if (oIsset($data, 'crawl_filter') === true) {
             $result = array(
@@ -194,7 +183,7 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
             'schedule_code' => SCHEDULE_CRAWLER_TYPE_INSERT
         );
         return json_encode($result);
-    } catch (Exception $e) {
+    } catch (\Throwable $e) {
         $result = array(
             'status' => false,
             'post_id' => null,
@@ -206,6 +195,21 @@ function crawl_ophim_movies_handle($url, $ophim_id, $ophim_update_time, $filterT
         );
         return json_encode($result);
     }
+}
+
+function fetch_movie_source($url)
+{
+    $raw = @file_get_contents($url);
+    if ($raw === false) {
+        $err = error_get_last();
+        $message = isset($err['message']) ? $err['message'] : ("Cannot fetch URL: " . $url);
+        throw new \RuntimeException($message);
+    }
+    $source = json_decode($raw, true);
+    if (!is_array($source) || !isset($source["movie"])) {
+        throw new \RuntimeException("Invalid movie payload from API: " . $url);
+    }
+    return $source;
 }
 
 function create_data($sourcePage, $url, $ophim_id, $ophim_update_time, $filterType = [], $filterCategory = [], $filterCountry = [], $filterYear = [])
