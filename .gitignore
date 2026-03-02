@@ -1,0 +1,13 @@
+.DS_Store
+uploads/
+upgrade/
+cache/
+ai1wm-backups/
+mu-plugins/
+plugins/*
+!plugins/ophim-core/
+!plugins/ophim-core/**
+themes/*
+!themes/ophim-theme-mtyy-wp-main/
+!themes/ophim-theme-mtyy-wp-main/**
+index.php
